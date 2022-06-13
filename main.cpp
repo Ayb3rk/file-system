@@ -36,9 +36,6 @@ vector<string> split(string str, char delimiter) {
 
 
 
-//initialize the FAT32 filesystem
-
-
 
 void change_directory(string path) {
 
