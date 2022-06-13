@@ -34,7 +34,13 @@ vector<string> split(string str, char delimiter) {
     return internal;
 }
 
-string change_directory(string path, string current_path) {
+
+
+//initialize the FAT32 filesystem
+
+
+
+void change_directory(string path) {
 
 }
 
@@ -57,7 +63,11 @@ void move_file(string filename, string path_to_move, string current_path) {
 void cat(string filename, string current_path) {
 
 }
-//create a main
+
+
+
+
+
 int main(int argc, char *argv[]) {
 
     while (1) {
@@ -76,12 +86,7 @@ int main(int argc, char *argv[]) {
         
         //check if the first token is cd
         if (tokens[0] == "cd") {
-            string new_directory = change_directory(tokens[1], current_path);
-            if (new_directory == "") {
-                printf("Error: Directory not found\n");
-            } else {
-                current_path = new_directory;
-            }
+            change_directory(tokens[1]);
         }
         //check if the first token is ls
         if (tokens[0] == "ls") {
