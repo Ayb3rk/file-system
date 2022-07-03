@@ -37,6 +37,7 @@ struct FileRoot {
     uint16_t modifiedTime;
     uint16_t modifiedDate;
     uint16_t firstCluster;         // Last two bytes of the first cluster
+    uint16_t parentCluster; // Parent directory cluster
     file_type type;                // File type
     uint32_t fileSize;             // Filesize in bytes
     vector <FileRoot> children;
@@ -88,14 +89,11 @@ string join(vector<string> strs, string delimiter) {
     return joined;
 }
 
-unsigned char lfn_checksum(const unsigned char *pFCBName)
-{
-    int i;
+unsigned char lfn_checksum(string name) {
     unsigned char sum = 0;
-
-    for (i = 11; i; i--)
-        sum = ((sum & 1) << 7) + (sum >> 1) + *pFCBName++;
-
+    for (int i = 0; i < name.length(); i++) {
+        sum = ((sum & 1) ? 0x80 : 0) + (sum >> 1) + name[i];
+    }
     return sum;
 }
 
@@ -111,6 +109,48 @@ vector<int> get_clusters_of_file(int first_cluster) {
         current_cluster = fat_table[current_cluster];
     }
     return clusters;
+}
+
+vector<string> divide (string filename) {
+    //divide filename to substrings with max length of 13
+    vector<string> substrings;
+    int i = 0;
+    while (i < filename.length()) {
+        string substring = filename.substr(i, 13);
+        substrings.push_back(substring);
+        i += 13;
+    }
+    return substrings;
+}
+
+vector<FatFileEntry> createLFN (string filename) {
+    vector<FatFileEntry> lfn;
+    vector<string> substrings = divide(filename);
+    while (substrings.size() > 0) {
+        FatFileEntry lfn_entry = {0};
+        string lfnname = substrings.back();
+        substrings.pop_back();
+        for(int i = 0; i < 5; i++) {
+            lfn_entry.lfn.name1[i] = lfnname[i];
+        }
+        for(int i = 0; i < 6; i++) {
+            lfn_entry.lfn.name2[i] = lfnname[i+5];
+        }
+        for(int i = 0; i < 2; i++) {
+            lfn_entry.lfn.name3[i] = lfnname[i+11];
+        }
+        lfn_entry.lfn.attributes = 0x0F;
+        lfn_entry.lfn.reserved = 0x00;
+        lfn_entry.lfn.firstCluster = 0x0000;
+        lfn.push_back(lfn_entry);
+    }
+    uint8_t size = lfn.size();
+    for(auto &lfn_entry : lfn) {
+        lfn_entry.lfn.sequence_number |= size;
+        size--;
+    }
+    lfn[0].lfn.sequence_number |= 0x40; //set the first entry to indicate it is the first entry
+    return lfn;
 }
 
 vector<FileRoot> get_files(int cluster) {
@@ -168,6 +208,7 @@ vector<FileRoot> get_files(int cluster) {
                     temp.modifiedDate = root_directory_entry.msdos.modifiedDate;
                     temp.firstCluster = (root_directory_entry.msdos.eaIndex << 16)| root_directory_entry.msdos.firstCluster;
                     temp.fileSize = root_directory_entry.msdos.fileSize;
+                    temp.parentCluster = cluster;
                     if(root_directory_entry.msdos.attributes & 0x10) {
                         temp.type = FILE_TYPE_DIRECTORY;
                     }
@@ -210,29 +251,29 @@ void read_fat32() {
 
 string get_month_string (uint16_t month) {
     switch(month) {
-        case 1:
+        case 0:
             return "January";
-        case 2:
+        case 1:
             return "February";
-        case 3:
+        case 2:
             return "March";
-        case 4:
+        case 3:
             return "April";
-        case 5:
+        case 4:
             return "May";
-        case 6:
+        case 5:
             return "June";
-        case 7:
+        case 6:
             return "July";
-        case 8:
+        case 7:
             return "August";
-        case 9:
+        case 8:
             return "September";
-        case 10:
+        case 9:
             return "October";
-        case 11:
+        case 10:
             return "November";
-        case 12:
+        case 11:
             return "December";
         default:
             return "ERRONOUS MONTH";
@@ -252,7 +293,7 @@ string get_time(uint16_t time) {
     return time_str;
 }
 
-string get_date(uint16_t date) {
+string get_date(uint16_t date) { //TODO: months are incorrect
     //convert date to Month + day string
     string date_str = "";
     uint16_t month = (date & 0x01E0) >> 5;
@@ -264,6 +305,144 @@ string get_date(uint16_t date) {
     }
     date_str += to_string(day);
     return date_str;
+}
+
+
+int num_of_files_in_path(string path) {
+    if(path == "") {
+        return root.children.size();
+    }
+    auto components = split(path, '/');
+    vector<FileRoot> children;
+    if(components[0] == "") { //absoulte path
+        children = root.children;
+        components.erase(components.begin());
+    }
+    else {
+        if(current_path.size() == 0) {
+            children = root.children;
+        }
+        else {
+            children = current_path.back()->children;
+        }
+    }
+    while(components.size() > 0) {
+        string component = components[0];
+        components.erase(components.begin());
+        for(int i = 0; i < children.size(); i++) {
+            if(children[i].name == component) {
+                if(components.size() == 0) {
+                    return children[i].children.size();
+                }
+                children = children[i].children;
+                break;
+            }
+        }
+        if(children.size() == 0 && components.size() > 0) {
+            return -1;
+        }
+    }
+    return -1;
+}
+
+
+int path_exists(string path) {
+    //return cluster number of path if it exists, otherwise return -1
+    if(path == "") {
+        if(current_path.size() == 0) {
+            return root.firstCluster;
+        }
+        else {
+            return current_path.back()->firstCluster;
+        }
+    }
+    auto components = split(path, '/');
+    vector<FileRoot> children;
+    if(components[0] == "") { //absoulte path
+        children = root.children;
+        components.erase(components.begin());
+    }
+    else {
+        if(current_path.size() == 0) {
+            children = root.children;
+        }
+        else {
+            children = current_path.back()->children;
+        }
+    }
+    while(components.size() > 0) {
+        string component = components[0];
+        components.erase(components.begin());
+        for(int i = 0; i < children.size(); i++) {
+            if(children[i].name == component) {
+                if(components.size() == 0) {
+                    return children[i].firstCluster;
+                }
+                children = children[i].children;
+                break;
+            }
+        }
+        if(children.size() == 0 && components.size() > 0) {
+            return -1;
+        }
+    }
+    return -1;
+}
+
+uint32_t find_new_cluster() {
+    for(int i = 2; i < fat_table.size(); i++) {
+        if(fat_table[i] == 0) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+pair<vector<int>, int> allocate_clusters(int cluster_num, int entry_count) {
+    vector<int> clusters_to_allocate;
+    int allocated_entries = 0;
+    int starting_entry;
+    int cluster = cluster_num;
+    while(true) {
+        int directory_sector = first_sector_of_cluster(cluster);
+        int sector_offset = directory_sector * bytes_per_sector;
+        lseek(file_image, sector_offset, SEEK_SET);
+        for(int i = 0; i < cluster_size/sizeof(FatFileEntry); i++) {
+            FatFileEntry entry = {};
+            read(file_image, &entry, 32);
+            if(entry.msdos.filename[0] == 0 || entry.msdos.filename[0] == 0xE5) {
+                if(allocated_entries == 0) {
+                    starting_entry = i;
+                }
+                allocated_entries++;
+            }
+            if(allocated_entries == entry_count) {
+                clusters_to_allocate.push_back(cluster);
+                return make_pair(clusters_to_allocate, starting_entry);
+            }
+            if(entry.msdos.filename[0] != 0 && entry.msdos.filename[0] != 0xE5) {
+                allocated_entries = 0;
+            }
+        }
+        if(allocated_entries > 0) {
+            clusters_to_allocate.push_back(cluster);
+        }
+        if(cluster == 0x0FFFFFF8) { //we need a new cluster for the file
+            uint32_t new_cluster = find_new_cluster();
+            fat_table[cluster_num] = new_cluster;
+            fat_table[new_cluster] = 0x0FFFFFF8;
+            int new_cluster_offset = reserved_sectors_count * bytes_per_sector + new_cluster * 4; 
+            int previous_cluster_offset = reserved_sectors_count * bytes_per_sector + cluster_num * 4;
+            lseek(file_image, previous_cluster_offset, SEEK_SET);
+            write(file_image, &new_cluster, sizeof(uint32_t));
+            lseek(file_image, new_cluster_offset, SEEK_SET);
+            write(file_image, &fat_table[new_cluster], sizeof(uint32_t));
+            cluster = new_cluster;
+        }
+        else {
+            cluster = fat_table[cluster];
+        }
+    }
 }
 
 void cat_file(FileRoot fileroot) {
@@ -292,9 +471,9 @@ void change_directory(string path) {
         return;
     }
 
-    if(path[0] == '/') {
+    if(path[0] == '/') { //if the path starts with a /, we're changing to the root directory
         current_path.clear();
-        path_components.erase(path_components.begin());
+        path_components.erase(path_components.begin()); //remove the first element, which is empty because of the '/'
     }
 
     for(auto component : path_components) {
@@ -366,7 +545,133 @@ void list_directory_long() { //list the directories with long names
     }
 }
 
+FatFileEntry create_base_entry(FatFileEntry dot_dot_entry) {
+    FatFileEntry entry = {0};
+    for(int i = 0; i < 8; i++) {
+        entry.msdos.filename[i] = ' ';
+    }
+    for(int i = 0; i < 3; i++) {
+        entry.msdos.extension[i] = ' ';
+    }
+    entry.msdos.attributes = 0x10; //directory
+    int cluster_num = find_new_cluster();
+    fat_table[cluster_num] = 0x0FFFFFF8; //mark the cluster as end of file
+    int cluster_num_offset_fat1 = reserved_sectors_count * bytes_per_sector + cluster_num * 4; //offset of the cluster number in the FAT table
+    int cluster_num_offset_fat2 = reserved_sectors_count * bytes_per_sector + cluster_num * 4 + bytes_per_fat; //offset of the cluster number in the FAT table
+    lseek(file_image, cluster_num_offset_fat1, SEEK_SET);
+    write(file_image, &fat_table[cluster_num], sizeof(uint32_t)); //write the cluster number to the FAT1 table
+    lseek(file_image, cluster_num_offset_fat2, SEEK_SET);
+    write(file_image, &fat_table[cluster_num], sizeof(uint32_t)); //write the cluster number to the FAT2 table
+    uint16_t high_bytes_cluster = (cluster_num >> 16) & 0xFFFF; //high bytes of the cluster number
+    uint16_t low_bytes_cluster = cluster_num & 0xFFFF; //low bytes of the cluster number
+    entry.msdos.eaIndex = high_bytes_cluster;
+    entry.msdos.firstCluster = low_bytes_cluster;
+    FatFileEntry dot_entry = {0};
+    dot_entry.msdos = entry.msdos;
+    dot_entry.msdos.filename[0] = '.';
+    dot_entry.msdos.filename[1] = ' ';
+    dot_entry.msdos.filename[2] = ' ';
+    dot_entry.msdos.filename[3] = ' ';
+    dot_entry.msdos.filename[4] = ' ';
+    dot_entry.msdos.filename[5] = ' ';
+    dot_entry.msdos.filename[6] = ' ';
+    dot_entry.msdos.filename[7] = ' ';
+    dot_entry.msdos.extension[0] = ' ';
+    dot_entry.msdos.extension[1] = ' ';
+    dot_entry.msdos.extension[2] = ' ';
+
+    //write dot and dot dot entries to the cluster
+    int cluster_offset = first_sector_of_cluster(cluster_num) * bytes_per_sector; //offset of the cluster in the file image
+    lseek(file_image, cluster_offset, SEEK_SET);
+    write(file_image, &dot_entry, sizeof(FatFileEntry));
+    write(file_image, &dot_dot_entry, sizeof(FatFileEntry));
+    return entry;
+}
+
+FatFileEntry find_dot_dot(int cluster) {
+    FatFileEntry entry = {0};
+    if(cluster == 2) { //root directory is in cluster 2
+        return entry;
+    }
+    else {
+        int directory_sector = first_sector_of_cluster(cluster);
+        int directory_sector_offset = directory_sector * bytes_per_sector;
+        lseek(file_image, directory_sector_offset, SEEK_SET);
+        read(file_image, &entry, sizeof(FatFileEntry)); //first entry in the directory is the directroy base
+    }
+    return entry;
+}
+
+//separate an integer to its digits
+vector<int> separate_int(int num) {
+    vector<int> digits;
+    while(num > 0) {
+        digits.push_back(num % 10);
+        num /= 10;
+    }
+    return digits;
+}
+
+
 void make_directory(string filename) {
+    if(filename == "") {
+        return;
+    }
+    auto components = split(filename, '/');
+    filename = filename.substr(1); //remove the first character, which is '/'
+    filename = components.back(); //get the last component of the path
+    components.pop_back(); //remove the last component of the path
+    string path = join(components, "/"); //recreate the path
+    int path_cluster_num = path_exists(path);
+    if(path_cluster_num == -1) {
+        return;
+    }
+    FatFileEntry dot_dot_entry = find_dot_dot(path_cluster_num); //return .. entry
+    dot_dot_entry.msdos.filename[0] = '.';
+    dot_dot_entry.msdos.filename[1] = '.'; //set the filename to ..
+    dot_dot_entry.msdos.filename[2] = ' ';
+    dot_dot_entry.msdos.filename[3] = ' ';
+    dot_dot_entry.msdos.filename[4] = ' ';
+    dot_dot_entry.msdos.filename[5] = ' ';
+    dot_dot_entry.msdos.filename[6] = ' ';
+    dot_dot_entry.msdos.filename[7] = ' ';
+    dot_dot_entry.msdos.extension[0] = ' ';
+    dot_dot_entry.msdos.extension[1] = ' ';
+    dot_dot_entry.msdos.extension[2] = ' ';
+    dot_dot_entry.msdos.attributes = 0x10; //set the attributes to directory
+    auto entries = createLFN(filename);
+    FatFileEntry base = create_base_entry(dot_dot_entry); //create the base entry for the directory
+    int filenum = num_of_files_in_path(path);
+    base.msdos.filename[0] = '~';
+    vector<int> numbers = separate_int(filenum+1);
+    for(int i = 0; i < numbers.size(); i++) {
+        base.msdos.filename[i+1] = to_string(numbers[i])[0];
+    }
+    string checksumname;
+    for(int i = 0; i < 8; i++) {
+        checksumname += base.msdos.filename[i];
+    }
+    for(int i = 0; i < 3; i++) {
+        checksumname += base.msdos.extension[i];
+    }
+    int checksum = lfn_checksum(checksumname);
+    for(auto &lfn : entries) {
+        lfn.lfn.checksum = checksum;
+    }
+    auto clusters = allocate_clusters(path_cluster_num ,entries.size()+1);
+    vector<int> allocated_clusters = clusters.first;
+    int starting_entry = clusters.second;
+    
+    for(int i = 0; i < allocated_clusters.size(); i++) {
+        int cluster_num = allocated_clusters[i];
+        int cluster_num_offset = first_sector_of_cluster(cluster_num) * bytes_per_sector + sizeof(FatFileEntry) * starting_entry; //offset of the cluster in the file image
+        lseek(file_image, cluster_num_offset, SEEK_SET);
+        for(int j = 0; j < entries.size(); j++) {
+            write(file_image, &entries[j], sizeof(FatFileEntry));
+        }
+    }
+    write(file_image, &base, sizeof(FatFileEntry));
+    root.children = get_children_recursive(2);
 
 }
 
